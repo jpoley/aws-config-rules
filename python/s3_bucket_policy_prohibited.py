@@ -1,10 +1,10 @@
 #
 # This file made available under CC0 1.0 Universal (https://creativecommons.org/publicdomain/zero/1.0/legalcode)
 #
-# Description: Check that no EC2 Instances are in Public Subnet
+# Description: Check if any s3 bucket has bucket policy and if it does mark it non-compliant
 #
 # Trigger Type: Change Triggered
-# Scope of Changes: EC2:Instance
+# Scope of Changes: S3:Instance
 # Accepted Parameters: None
 # Your Lambda function execution role will need to have a policy that provides the appropriate
 # permissions.  Here is a policy that you can consider.  You should validate this for your own
@@ -21,11 +21,10 @@
 #            ],
 #            "Resource": "arn:aws:logs:*:*:*"
 #        },
-#        {
+#       {
 #            "Effect": "Allow",
 #            "Action": [
-#                "config:PutEvaluations",
-#                "ec2:DescribeRouteTables"
+#                "config:PutEvaluations"
 #            ],
 #            "Resource": "*"
 #        }
@@ -34,56 +33,42 @@
 #
 
 import boto3
-import botocore
 import json
 import logging
 
 log = logging.getLogger()
-log.setLevel(logging.INFO)
+log.setLevel(logging.DEBUG)
+APPLICABLE_RESOURCES = ["AWS::S3::Bucket"]
+
 
 def evaluate_compliance(configuration_item):
-    subnet_id   = configuration_item["configuration"]["subnetId"]
-    vpc_id      = configuration_item["configuration"]["vpcId"]
-    client      = boto3.client("ec2");
+    if configuration_item["resourceType"] not in APPLICABLE_RESOURCES:
+        return {
+            "compliance_type": "NOT_APPLICABLE",
+            "annotation": "The rule doesn't apply to resources of type " +
+            configuration_item["resourceType"] + "."
+        }
 
-    response    = client.describe_route_tables()
+    if configuration_item['configurationItemStatus'] == "ResourceDeleted":
+        return {
+            "compliance_type": "NOT_APPLICABLE",
+            "annotation": "The configurationItem was deleted " +
+                          "and therefore cannot be validated"
+        }
 
-    # If the subnet is explicitly associated to a route table, check if there
-    # is a public route. If no explicit association exists, check if the main
-    # route table has a public route.
-
-    private = True
-    mainTableIsPublic = False
-    noExplicitAssociationFound = True
-    explicitAssocationIsPublic = False
-
-    for i in response['RouteTables']:
-        if i['VpcId'] == vpc_id:
-            for j in i['Associations']:
-                if j['Main'] == True:
-                    for k in i['Routes']:
-                        if k['DestinationCidrBlock'] == '0.0.0.0/0' or k['GatewayId'].startswith('igw-'):
-                            mainTableIsPublic = True
-                else:
-                    if j['SubnetId'] == subnet_id:
-                        noExplicitAssociationFound = False
-                        for k in i['Routes']:
-                            if k['DestinationCidrBlock'] == '0.0.0.0/0' or k['GatewayId'].startswith('igw-'):
-                                explicitAssocationIsPublic = True
-
-    if (mainTableIsPublic and noExplicitAssociationFound) or explicitAssocationIsPublic:
-        private = False
-
-    if private:
+    bucket_policy = configuration_item["supplementaryConfiguration"].get("BucketPolicy")
+    if bucket_policy['policyText'] is None:
         return {
             "compliance_type": "COMPLIANT",
-            "annotation": 'Its in private subnet'
+            "annotation": 'Bucket Policy does not exists'
         }
+
     else:
         return {
-            "compliance_type" : "NON_COMPLIANT",
-            "annotation" : 'Not in private subnet'
+            "compliance_type": "NON_COMPLIANT",
+            "annotation": 'Bucket Policy exists'
         }
+
 
 def lambda_handler(event, context):
     log.debug('Event %s', event)
@@ -92,7 +77,7 @@ def lambda_handler(event, context):
     evaluation          = evaluate_compliance(configuration_item)
     config              = boto3.client('config')
 
-    response = config.put_evaluations(
+    config.put_evaluations(
        Evaluations=[
            {
                'ComplianceResourceType':    invoking_event['configurationItem']['resourceType'],
